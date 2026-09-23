@@ -1,0 +1,331 @@
+// SPDX-License-Identifier: GPL-2.0-or-later OR MIT
+/*
+ * TP-Link TL-R2005KSH / TELESQUARE LTE router (board: TLR-2005KSH)
+ *
+ * SoC:    MediaTek MT7620A (MIPS 24KEc, 620 MHz)
+ * RAM:    64 MiB DDR2
+ * Flash:  Winbond W25Q256 (32 MiB SPI-NOR, 4 KiB erase, 25 MHz)
+ * NET:    MT7620A internal 5-port 10/100 switch; WAN at ESW port 4,
+ *         LAN jacks wired in reverse (LAN1=port3 ... LAN4=port0)
+ * USB:    USB 2.0 host -> internal Qualcomm Gobi LTE module (GobiNet on the
+ *         stock firmware, behind an internal 4-port hub)
+ * WiFi:   MT7620A internal 2.4 GHz only (no 5 GHz, no mini-PCIe populated)
+ * UART:   uartlite (0x10000c00) at 57600 baud is the console
+ *
+ * GPIO map recovered from the stock firmware:
+ *   /usr/sbin/tlsq/bmon           board monitor: LEDs, reset button, modem
+ *                                 power/reset, USB mode strap, watchdog
+ *   /usr/sbin/tlsq/modem_hw_reset, dload_modem_reset.sh, pantech_qmi_modem.sh
+ *   /sbin/config.sh               build config: CONFIG_WAN_AT_P4=y,
+ *                                 CONFIG_MODEL_TLR2005KSH=y,
+ *                                 CONFIG_PRODUCT_TELESQUARE=y,
+ *                                 CONFIG_RT_3052_ESW=y
+ *
+ * Flash map (offsets verified against a 32 MiB dump):
+ *   0x000000  bootloader      Breed 1.1 (256 KiB)
+ *   0x040000  u-boot-env      vendor env text (4-byte header + key=value)
+ *   0x042000  nvram           vendor config, CRC32-LE header, 16 KiB block
+ *   0x060000  factory         base MAC at +0x04 (rest erased, no eeprom)
+ *   0x080000  firmware        kernel + rootfs  (vendor "Image1")
+ *   0x1000000 firmware2       vendor backup image ("Image2", identical)
+ *   0x1800000 storage         unused tail (erased)
+ *   0x1ff0000 reserved        last sector (erased)
+ */
+
+/dts-v1/;
+
+#include "mt7620a.dtsi"
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/leds/common.h>
+
+/ {
+	compatible = "tplink,tl-r2005ksh", "ralink,mt7620a-soc";
+	model = "TP-Link TL-R2005KSH";
+
+	aliases {
+		label-mac-device = &ethernet;
+
+		led-boot = &led_status;
+		led-failsafe = &led_status;
+		led-running = &led_status;
+		led-upgrade = &led_status;
+	};
+
+	chosen {
+		/*
+		 * Stock firmware bootargs were
+		 *   "console=ttyS1,57600n8 root=/dev/ram0 console=ttyS0"
+		 * on its 2.6.36 kernel, where 8250 ttyS1 = 0x10000c00 (uartlite).
+		 * mt7620a.dtsi aliases serial0 to &uartlite, so that UART is
+		 * ttyS0 in modern kernels - keep 57600 baud.
+		 */
+		bootargs = "console=ttyS0,57600";
+	};
+
+	memory@0 {
+		device_type = "memory";
+		reg = <0x0 0x4000000>;		/* 64 MiB DDR2 */
+	};
+
+	keys {
+		compatible = "gpio-keys";
+
+		/*
+		 * bmon: gpio_direction_set(13, input) at init, then
+		 * gpio_get(13) == 0 counts up; when the count reaches 6 the
+		 * "Factory_Reset_Check" path runs -> active low.
+		 */
+		reset {
+			label = "reset";
+			gpios = <&gpio0 13 GPIO_ACTIVE_LOW>;
+			linux,code = <KEY_RESTART>;
+		};
+	};
+
+	leds {
+		compatible = "gpio-leds";
+
+		/*
+		 * Four GPIO status LEDs, driven through bmon's LED helper
+		 * (led_set(group, index, value) -> gpio_set()):
+		 *   (0,0)=GPIO14   (0,1)=GPIO12   (1,0)=GPIO59   (1,1)=GPIO11
+		 *
+		 * bmon drives GPIO14 = 1 and the other three = 0 on start and
+		 * all four = 0 on stop, so GPIO14 is the "power/status" LED
+		 * that stays lit while the device runs (hence GPIO_ACTIVE_HIGH;
+		 * flip to ACTIVE_LOW if the LEDs behave inverted on hardware).
+		 * Which silkscreen label the other three carry (WAN / WiFi /
+		 * LTE) is not encoded anywhere in the firmware - identify them
+		 * by toggling each LED from userspace.
+		 */
+		led_status: status {
+			function = LED_FUNCTION_STATUS;
+			color = <LED_COLOR_ID_GREEN>;
+			gpios = <&gpio0 14 GPIO_ACTIVE_HIGH>;
+			default-state = "on";
+		};
+
+		led_aux1: aux1 {
+			label = "green:aux1";
+			gpios = <&gpio0 12 GPIO_ACTIVE_HIGH>;
+		};
+
+		led_aux2: aux2 {
+			label = "green:aux2";
+			gpios = <&gpio0 11 GPIO_ACTIVE_HIGH>;
+		};
+
+		led_aux3: aux3 {
+			label = "green:aux3";
+			gpios = <&gpio2 19 GPIO_ACTIVE_HIGH>;
+		};
+	};
+
+	/*
+	 * LTE module control lines (driven by bmon) exported as plain GPIOs so
+	 * the modem can be power-cycled from userspace:
+	 *   modem-reset     - pulse 0 for ~1 s, then back to 1 (bmon's
+	 *                     gct_modem_reset, dload_modem_reset.sh)
+	 *   modem-power     - driven 1 together with the reset line
+	 *   modem-usb-mode  - 1 = "USB NORMAL MODE" (bmon logs "USB NORMAL
+	 *                     MODE ON !!!"; pantech_qmi_modem.sh toggles the
+	 *                     same line around modem firmware download)
+	 */
+	gpio-export {
+		compatible = "gpio-export";
+
+		modem-reset {
+			gpio-export,name = "modem-reset";
+			gpio-export,output = <1>;
+			gpios = <&gpio0 2 GPIO_ACTIVE_HIGH>;
+		};
+
+		modem-power {
+			gpio-export,name = "modem-power";
+			gpio-export,output = <1>;
+			gpios = <&gpio2 6 GPIO_ACTIVE_HIGH>;
+		};
+
+		modem-usb-mode {
+			gpio-export,name = "modem-usb-mode";
+			gpio-export,output = <1>;
+			gpios = <&gpio2 7 GPIO_ACTIVE_HIGH>;
+		};
+	};
+};
+
+&spi0 {
+	status = "okay";
+
+	flash@0 {
+		compatible = "jedec,spi-nor";
+		reg = <0>;
+		spi-max-frequency = <25000000>;
+		m25p,fast-read;
+
+		partitions {
+			compatible = "fixed-partitions";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			partition@0 {
+				label = "bootloader";
+				reg = <0x0 0x40000>;
+				read-only;
+			};
+
+			/* vendor env text: 4-byte header + "bootcmd=tftp" ... */
+			partition@40000 {
+				label = "u-boot-env";
+				reg = <0x40000 0x2000>;
+				read-only;
+			};
+
+			/* vendor config database, CRC32-LE over the remaining
+			 * 16380 bytes of the 16 KiB block (see README.md).
+			 * Contains login/password digest, WAN settings, ... */
+			partition@42000 {
+				label = "nvram";
+				reg = <0x42000 0x4000>;
+				read-only;
+			};
+
+			/*
+			 * Base MAC address at +0x04 (d8:19:ce:02:7a:d5),
+			 * everything else erased.  The stock image has no
+			 * MT7620 eeprom in flash - the 2.4 GHz calibration is
+			 * taken from the SoC efuse.  If WiFi does not come up,
+			 * write a 512-byte eeprom here (MAC at 0x4) and
+			 * uncomment the nvmem-cells in &wmac below.
+			 */
+			factory: partition@60000 {
+				label = "factory";
+				reg = <0x60000 0x1000>;
+				read-only;
+
+				nvmem-layout {
+					compatible = "fixed-layout";
+					#address-cells = <1>;
+					#size-cells = <1>;
+
+					eeprom_factory_0: eeprom@0 {
+						reg = <0x0 0x200>;
+					};
+
+					macaddr_factory_4: macaddr@4 {
+						reg = <0x4 0x6>;
+					};
+				};
+			};
+
+			/*
+			 * Vendor "Image1": kernel (uImage, LZMA, load
+			 * 0x80000000) with the root filesystem embedded as an
+			 * XZ-compressed initramfs, followed by the JFFS2
+			 * config partition at 0xE00000.
+			 *
+			 * OpenWrt: kernel + squashfs rootfs + rootfs_data.
+			 */
+			partition@80000 {
+				compatible = "denx,uimage";
+				label = "firmware";
+				reg = <0x80000 0xf80000>;
+			};
+
+			/*
+			 * Vendor "Image2" - a second, byte-identical kernel at
+			 * 0x1080000 used as a recovery copy by the stock
+			 * bootloader.  Not used by OpenWrt, but keep it: it is
+			 * the easiest way back to stock firmware (copy it back
+			 * to 0x80000 from the bootloader).
+			 */
+			partition@1000000 {
+				label = "firmware2";
+				reg = <0x1000000 0x800000>;
+				read-only;
+			};
+
+			/* unused, erased tail of the flash */
+			partition@1800000 {
+				label = "storage";
+				reg = <0x1800000 0x7f0000>;
+			};
+
+			partition@1ff0000 {
+				label = "reserved";
+				reg = <0x1ff0000 0x10000>;
+				read-only;
+			};
+		};
+	};
+};
+
+&ethernet {
+	pinctrl-names = "default";
+	pinctrl-0 = <&ephy_pins>;
+
+	nvmem-cells = <&macaddr_factory_4>;
+	nvmem-cell-names = "mac-address";
+
+	/* 4x LAN + 1x WAN: /sbin/config.sh has CONFIG_WAN_AT_P4=y and the SDK
+	 * calls config-vlan.sh 3 LLLLW (WAN at ESW port 4) */
+	mediatek,portmap = "llllw";
+};
+
+&gpio2 {
+	status = "okay";		/* GPIO 46/47/59 (modem + LED) */
+};
+
+&ehci {
+	status = "okay";
+};
+
+&ohci {
+	status = "okay";
+};
+
+/*
+ * The second UART (&uart, 0x10000500) is intentionally left disabled: the
+ * stock firmware registered it as ttyS0 but never used it, and its pins share
+ * the "uartf" group with the LED/reset-button GPIOs 11-14 that this board
+ * needs as GPIOs.
+ */
+
+&wmac {
+	pinctrl-names = "default", "pa_gpio";
+	pinctrl-0 = <&pa_pins>;
+	pinctrl-1 = <&pa_gpio_pins>;
+
+	/*
+	 * No eeprom on flash (see factory partition).  Uncomment if the
+	 * factory partition gets populated with a real 512-byte eeprom:
+	 *
+	 * nvmem-cells = <&eeprom_factory_0>;
+	 * nvmem-cell-names = "eeprom";
+	 */
+};
+
+&pcie {
+	status = "disabled";
+};
+
+&pinctrl {
+	state_default: pinctrl0 {
+		/*
+		 * GPIOs used by this board:
+		 *   GPIO 2         modem reset               (i2c group)
+		 *   GPIO 11-14     LEDs + reset button       (uartf group)
+		 *   GPIO 46/47/59  modem power/mode, LED     (bank 2 groups)
+		 * Free every group that is not used for its original function.
+		 * "spi" (flash), "uartlite" (console), "ephy" (ethernet) and
+		 * "pa" (WiFi PA) are intentionally left alone.
+		 */
+		gpio {
+			groups = "i2c", "uartf", "pcie", "rgmii1", "rgmii2",
+				 "wled", "nd_sd";
+			function = "gpio";
+		};
+	};
+};
