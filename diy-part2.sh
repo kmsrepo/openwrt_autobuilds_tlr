@@ -49,6 +49,11 @@ fi
 
 echo "==> Patching 02_network (switch layout + MAC addresses)"
 python3 - <<'PY'
+import re
+
+# x-wrt uses 'case $board in', older OpenWrt trees 'case "$board" in'
+CASE_RE = re.compile(r'^\s*case\s+"?\$board"?\s+in\b')
+
 p = 'target/linux/ramips/mt7620/base-files/etc/board.d/02_network'
 s = open(p).read()
 if 'tplink,tl-r2005ksh' in s:
@@ -74,13 +79,13 @@ macs = '''\ttplink,tl-r2005ksh)
 out, in_if, in_mac, done_if, done_mac = [], False, False, False, False
 for line in s.splitlines(True):
     out.append(line)
-    if line.startswith('ramips_setup_interfaces()'):
+    if line.startswith('ramips_setup_interfaces'):
         in_if = True
-    elif line.startswith('ramips_setup_macs()'):
+    elif line.startswith('ramips_setup_macs'):
         in_mac = True
-    if in_if and not done_if and 'case "$board" in' in line:
+    if in_if and not done_if and CASE_RE.match(line):
         out.append(iface); done_if, in_if = True, False
-    elif in_mac and not done_mac and 'case "$board" in' in line:
+    elif in_mac and not done_mac and CASE_RE.match(line):
         out.append(macs); done_mac, in_mac = True, False
 
 if not (done_if and done_mac):
@@ -91,15 +96,26 @@ PY
 
 echo "==> Selecting the device in .config"
 if [ -f .config ]; then
-	sed -i 's/^CONFIG_TARGET_ramips_mt7620_DEVICE_xiaomi_miwifi-r3=y/# CONFIG_TARGET_ramips_mt7620_DEVICE_xiaomi_miwifi-r3 is not set/' .config
-	sed -i 's/^# CONFIG_TARGET_ramips_mt7620_DEVICE_tplink_tl-r2005ksh is not set/CONFIG_TARGET_ramips_mt7620_DEVICE_tplink_tl-r2005ksh=y/' .config
-	grep -q '^CONFIG_TARGET_ramips_mt7620_DEVICE_tplink_tl-r2005ksh=y' .config || \
-		echo 'CONFIG_TARGET_ramips_mt7620_DEVICE_tplink_tl-r2005ksh=y' >> .config
-	sed -i 's/^CONFIG_TARGET_PROFILE=.*/CONFIG_TARGET_PROFILE="DEVICE_tplink_tl-r2005ksh"/' .config
-	# no 5 GHz / mini-PCIe card on this board
-	sed -i 's/^CONFIG_PACKAGE_kmod-mt76x2=y/# CONFIG_PACKAGE_kmod-mt76x2 is not set/' .config
-	sed -i 's/^CONFIG_PACKAGE_kmod-mt76x2-common=y/# CONFIG_PACKAGE_kmod-mt76x2-common is not set/' .config
-	sed -i 's/^CONFIG_PACKAGE_kmod-mt76x02-common=y/# CONFIG_PACKAGE_kmod-mt76x02-common is not set/' .config
+	python3 - <<'PY'
+import re
+
+DEV = 'CONFIG_TARGET_ramips_mt7620_DEVICE_tplink_tl-r2005ksh'
+p = '.config'
+s = open(p).read()
+
+s = re.sub(r'^CONFIG_TARGET_ramips_mt7620_DEVICE_xiaomi_miwifi-r3=y',
+           '# CONFIG_TARGET_ramips_mt7620_DEVICE_xiaomi_miwifi-r3 is not set', s, flags=re.M)
+s = re.sub(r'^# %s is not set$' % DEV, '%s=y' % DEV, s, flags=re.M)
+if '%s=y' % DEV not in s:
+    s = s.rstrip('\n') + '\n%s=y\n' % DEV
+s = re.sub(r'^CONFIG_TARGET_PROFILE=.*$',
+           'CONFIG_TARGET_PROFILE="DEVICE_tplink_tl-r2005ksh"', s, flags=re.M)
+# no 5 GHz / mini-PCIe card on this board
+s = re.sub(r'^(CONFIG_PACKAGE_kmod-mt76x2(?:-common|-u)?|CONFIG_PACKAGE_kmod-mt76x02-common)=y$',
+           r'# \1 is not set', s, flags=re.M)
+open(p, 'w').write(s)
+print('   .config updated: %s=y' % DEV)
+PY
 else
 	echo "   no .config found - select the device manually:"
 	echo "   CONFIG_TARGET_ramips_mt7620_DEVICE_tplink_tl-r2005ksh=y"
