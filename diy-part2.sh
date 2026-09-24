@@ -47,51 +47,68 @@ TARGET_DEVICES += tplink_tl-r2005ksh
 EOF
 fi
 
-echo "==> Patching 02_network (switch layout + MAC addresses)"
+echo "==> Patching board.d files (switch layout, MAC addresses, LEDs)"
 python3 - <<'PY'
 import re
+import sys
 
 # x-wrt uses 'case $board in', older OpenWrt trees 'case "$board" in'
 CASE_RE = re.compile(r'^\s*case\s+"?\$board"?\s+in\b')
-
-p = 'target/linux/ramips/mt7620/base-files/etc/board.d/02_network'
-s = open(p).read()
-if 'tplink,tl-r2005ksh' in s:
-    print('   already patched')
-    raise SystemExit(0)
+B = 'target/linux/ramips/mt7620/base-files/etc/board.d/'
 
 # switch layout taken from the vendor firmware (config.sh has CONFIG_WAN_AT_P4=y,
 # internet.sh calls "config-vlan.sh 3 LLLLW" -> WAN at ESW port 4) and from
 # admin_lan.sh, which maps the UI labels to ports as
 #   lan_1 -> port 3, lan_2 -> port 2, lan_3 -> port 1, lan_4 -> port 0, wan -> 4
-iface = '''\ttplink,tl-r2005ksh)
+IFACE = '''\ttplink,tl-r2005ksh)
 \t\tucidef_add_switch "switch0" \\
 \t\t\t"3:lan:1" "2:lan:2" "1:lan:3" "0:lan:4" "4:wan" "6@eth0"
 \t\t;;
 '''
 # base MAC lives at factory+0x4; the stock firmware used the same MAC for
 # LAN and WAN.  Use macaddr_add "$(...)" 1 for WAN if your ISP does not bind.
-macs = '''\ttplink,tl-r2005ksh)
+MACS = '''\ttplink,tl-r2005ksh)
 \t\twan_mac=$(mtd_get_mac_binary factory 0x4)
 \t\tlabel_mac=$(mtd_get_mac_binary factory 0x4)
 \t\t;;
 '''
-out, in_if, in_mac, done_if, done_mac = [], False, False, False, False
-for line in s.splitlines(True):
-    out.append(line)
-    if line.startswith('ramips_setup_interfaces'):
-        in_if = True
-    elif line.startswith('ramips_setup_macs'):
-        in_mac = True
-    if in_if and not done_if and CASE_RE.match(line):
-        out.append(iface); done_if, in_if = True, False
-    elif in_mac and not done_mac and CASE_RE.match(line):
-        out.append(macs); done_mac, in_mac = True, False
+# bmon keeps GPIO14 lit while the device runs -> status/power LED.  The three
+# auxiliary LEDs (green:aux1..3) have no function documented in the firmware;
+# add netdev/switch triggers once identified on hardware, e.g.
+#   ucidef_set_led_netdev "4g" "4g" "green:aux2" "wwan0"
+LEDS = '''\ttplink,tl-r2005ksh)
+\t\tucidef_set_led_default "status" "status" "green:status" "1"
+\t\t;;
+'''
 
-if not (done_if and done_mac):
-    raise SystemExit('ERROR: could not patch 02_network (anchors not found)')
-open(p, 'w').write(''.join(out))
-print('   patched')
+# (file, function in 02_network to hook into or None, case arm)
+JOBS = [
+    (B + '02_network', 'ramips_setup_interfaces', IFACE),
+    (B + '02_network', 'ramips_setup_macs',       MACS),
+    (B + '01_leds',    None,                      LEDS),
+]
+
+def patch(path, func, arm):
+    s = open(path).read()
+    if arm in s:
+        print('   %s: already patched' % path)
+        return True
+    out, active, done = [], func is None, False
+    for line in s.splitlines(True):
+        out.append(line)
+        if func is not None and line.startswith(func):
+            active = True
+        if active and not done and CASE_RE.match(line):
+            out.append(arm)
+            done, active = True, False
+    if not done:
+        print('   %s: ERROR - case anchor not found' % path)
+        return False
+    open(path, 'w').write(''.join(out))
+    print('   %s: patched' % path)
+    return True
+
+sys.exit(0 if all([patch(*j) for j in JOBS]) else 1)
 PY
 
 echo "==> Selecting the device in .config"
