@@ -11,11 +11,12 @@
 name: Build TL-R2005KSH firmware
 
 on:
+  # Manual only - pushes do NOT start a build.
+  # Start it from: Actions -> "Build TL-R2005KSH firmware" -> Run workflow.
+  # To autobuild on every push, add:
+  #   push:
+  #     branches: [ main ]
   workflow_dispatch:
-  push:
-    branches: [ main ]
-    paths-ignore:
-      - 'README.md'
 
 permissions:
   contents: write

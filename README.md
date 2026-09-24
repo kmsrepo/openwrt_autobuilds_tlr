@@ -3,8 +3,10 @@
 GitHub Actions autobuild of **OpenWrt (x-wrt)** for the **TP-Link TL-R2005KSH**
 (TELESQUARE-branded LTE router, board `TLR-2005KSH`).
 
-Push to `main` (or run the workflow manually) and the firmware lands in
-[Releases](../../releases) and as a workflow artifact.
+Builds are **manual**: GitHub Actions -> *Build TL-R2005KSH firmware* ->
+*Run workflow*. Pushing commits does not start a build (add a `push:` trigger
+in `.github/workflows/build.yml` to change that). When it finishes the firmware
+lands in [Releases](../../releases) and as a workflow artifact.
 
 ## Device
 
